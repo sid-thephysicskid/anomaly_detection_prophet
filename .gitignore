@@ -6,3 +6,9 @@ data
 
 # Ignore files related to API keys
 .env
+
+*.DS_Store*
+
+*.pyc
+
+__pycache__

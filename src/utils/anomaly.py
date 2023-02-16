@@ -1,46 +1,14 @@
 import pandas as pd
-
-import numpy as np
-import matplotlib as mpl
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-
 from prophet import Prophet
 import ruptures as rpt
-from ruptures.utils import pairwise
-from itertools import cycle
-
-mpl.rcParams['figure.figsize'] = (20, 16)
-mpl.rcParams['axes.grid'] = False
+from anomaly.data_utils import AnomalyData
 
 
-
-
-class AnomalyDetector:
-    def __init__(self,df, test_window=14, train_window=21, beta=0.1, 
-    ruptures_changepnt_penalty=10, prophet_interval_width=0.95, 
-    prophet_changepnt_prior = 0.15, weekly_seasonality= False,
-    color_cycle = ["#4286f4", "#f44174"]):
-        '''
-        Args
-        ---
-        changepoint_penalty: float
-        Higher the value, more conservative the segmentation, must be >0
-        '''
-        self.df = df
-        self.test_window = test_window
-        self.train_window = train_window
-        self.beta = beta
-        self.ruptures_changepnt_penalty = ruptures_changepnt_penalty
-        self.prophet_interval_width = prophet_interval_width
-        self.prophet_changepnt_prior = prophet_changepnt_prior
-        self.weekly_seasonality = weekly_seasonality
-        self.color_cycle = color_cycle
-        # self.P = P
-
+class AnomalyDetector(object):
+    def apply(self):
+        raise Exception("Method not defined on abstract base class")
 
     def apply_changepnt_detection(self,changepnt_model="rbf"):
-            
         '''
         Apply changepoint detection ala ruptures package and generate breakpoint indices
         Args
@@ -49,26 +17,52 @@ class AnomalyDetector:
             Pelt segment model, ["l1", "l2", "rbf"] 
             https://centre-borelli.github.io/ruptures-docs/code-reference/detection/pelt-reference/
 
-        
         Returns
         ---
         breakpoints: list
             List of breakpoint indices
         '''
-        signal = self.df['y'].to_numpy()
+        signal = self.data.df['y'].to_numpy()
         algo = rpt.Pelt(model=changepnt_model).fit(signal)
         result = algo.predict(pen=self.ruptures_changepnt_penalty)
-        breakpoints = [0] + sorted(result)
-        self.changepnts = breakpoints
+        breakpoints = [1] + sorted(result)
+        self.data.changepoints = breakpoints
         return self
 
     def plot_changepoints(self): 
         color_cycle = cycle(self.color_cycle)
         fig, ax = plt.subplots(1,1,figsize=(16,8))
-        ax.plot(self.df['ds'],self.df['y'], '-o', markersize=2, linewidth=1)
-        for (start, end), col in zip(pairwise(self.changepnts), color_cycle):
-            ax.axvspan(self.df.iloc[max(0,start-1)]['ds'], self.df.iloc[end-1]['ds'], facecolor=col,alpha=0.2)
+        ax.plot(self.data.df['ds'],self.data.df['y'], '-o', markersize=2, linewidth=1)
+        for (start, end), col in zip(pairwise(self.data.breakpoints), color_cycle):
+            ax.axvspan(self.data.df.iloc[max(0,start-1)]['ds'], self.data.df.iloc[end-1]['ds'], facecolor=col,alpha=0.2)
         plt.show()
+
+
+class ProphetAnomalyDetector(AnomalyDetector):
+    def __init__(self, data: AnomalyData, test_window=14, train_window=21, beta=0.1, 
+                 ruptures_changepnt_penalty=10, prophet_interval_width=0.95, 
+                 prophet_changepnt_prior = 0.15, weekly_seasonality=False):
+        '''
+        Args
+        ---
+        changepoint_penalty: float
+        Higher the value, more conservative the segmentation, must be >0
+        '''
+        super(ProphetAnomalyDetector, self).__init__()
+        
+        self.data = data
+        self.test_window = test_window
+        self.train_window = train_window
+        self.beta = beta
+        self.ruptures_changepnt_penalty = ruptures_changepnt_penalty
+        self.prophet_interval_width = prophet_interval_width
+        self.prophet_changepnt_prior = prophet_changepnt_prior
+        self.weekly_seasonality = weekly_seasonality
+
+    def apply(self):
+        self.apply_changepnt_detection().prophet_fit().get_outliers()#.prophet_plot()
+        return self
+    
 
     def prophet_fit(self):
 
@@ -81,30 +75,32 @@ class AnomalyDetector:
         
         #segment time frames
         # Test/Forecast window
-        end_index = self.df.index[-1]
+        end_index = self.data.df.index[-1]
         test_start_index = end_index - self.test_window + 1 
         print(f'TEST start index is {test_start_index}')
         print(f'TEST END index is {end_index}') #the test end index is setup to be the last index of df
         
         # Train window, starts at the last changepoint unless the train window goes further back
-        if test_start_index - self.changepnts[-2] < self.train_window:
+        if test_start_index - self.data.changepoints[-2] < 7:
             train_start_index = test_start_index - self.train_window
+        # elif self.data.changepoints[-2] > 0:
+        #     train_start_index = self.data.changepoints[-2] - 1
         else:
-            train_start_index = self.changepnts[-2]
+            train_start_index = self.data.changepoints[-2] - 1
         print(f'TRAIN start index is {train_start_index}')
 
         train_end_index = test_start_index - 1
         print(f'TRAIN end index is {train_end_index}')
-        baseline_ts = self.df['ds'][train_start_index:train_end_index]
-        baseline_y = self.df['y'][train_start_index:train_end_index]
-        print('TRAIN from {} to {}'.format(self.df['ds'][train_start_index], self.df['ds'][train_end_index]))
-        print('PREDICT from {} to {}'.format(self.df['ds'][test_start_index], self.df['ds'][end_index]))
+        baseline_ts = self.data.df['ds'][train_start_index:train_end_index+1]
+        baseline_y = self.data.df['y'][train_start_index:train_end_index+1]
+        print('TRAIN from {} to {}'.format(self.data.df['ds'][train_start_index], self.data.df['ds'][train_end_index+1]))
+        print('PREDICT from {} to {}'.format(self.data.df['ds'][test_start_index], self.data.df['ds'][end_index]))
 
         # fit the model
         prophet_model.fit(pd.DataFrame({'ds': baseline_ts.values,
-                                        'y': baseline_y.values}))#,  algorithm = 'Newton')
+                                        'y': baseline_y.values}),  algorithm = 'Newton')
         
-        future = prophet_model.make_future_dataframe(periods=self.test_window)
+        future = prophet_model.make_future_dataframe(periods=self.test_window )
         # make prediction
         forecast = prophet_model.predict(future)
         self.forecast = forecast
@@ -138,10 +134,10 @@ class AnomalyDetector:
         df_pred = self.forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(self.test_window)
         df_pred.index = df_pred['ds'].dt.to_pydatetime()
         df_pred.columns = ['ds', 'preds', 'lower_y', 'upper_y']
-        end_index = self.df.index[-1]
+        end_index = self.data.df.index[-1]
 
         test_start_index = end_index - self.test_window 
-        df_pred['actual'] = self.df['y'][test_start_index: end_index].values
+        df_pred['actual'] = self.data.df['y'][test_start_index:end_index].values
 
         # construct a list of outliers
         outlier_index = list()
@@ -157,13 +153,13 @@ class AnomalyDetector:
                 outlier_index += [i]
                 p = (pred_value - actual_value)/pred_value
                 penalty.append(p)
-                outliers.append((df_pred.index[i], actual_value, p))
+                outliers.append((df_pred.index[i-1], actual_value, p))
                 
             elif actual_value > upper_bound:
                 outlier_index += [i]
                 p = (actual_value - pred_value)/pred_value
                 penalty.append(p)
-                outliers.append((df_pred.index[i], actual_value, p))            
+                outliers.append((df_pred.index[i-1], actual_value, p))            
 
                 # print out the evaluation for each outlier
                 print('=====')
@@ -172,60 +168,13 @@ class AnomalyDetector:
                 print('Date: {}'.format(str(df_pred.index[i])[:10]))
 
         P = sum(penalty)
-        print('Net Penalty for the prediction interval of last {} days is {}'.format(self.test_window, P))
+        print('{}: Net Penalty for the prediction interval of last {} days is {}'.format(self.data.customer,self.test_window, P))
         for outlier in outliers:
             print(outlier)
         
-        self.outliers = outliers #list
-        self.P = P  #scalar
+        self.data.outliers = outliers #list
+        self.data.P = P  #scalar
 
         return self
 
 
-
-    def prophet_plot(self):#df, forecast, prophet_model, changepoints_list, outliers=list()):
-        """
-        Plot the actual, predictions, and anomalous values
-        Args
-        ----
-        df : pandas DataFrame
-            The daily time-series data set contains ds column for
-            dates (datetime types such as datetime64[ns]) and y column for numerical values
-
-        outliers : a list of (datetime, int) tuple
-            The outliers we want to highlight on the plot.
-        """
-        # generate the plot
-        fig = self.model.plot(self.forecast)
-        
-        # retrieve the subplot in the generated Prophets matplotlib figure
-        ax = fig.get_axes()[0]
-
-        #plot actual values
-        x_pydatetime = self.df['ds'].dt.to_pydatetime()
-        ax.plot(x_pydatetime,
-            self.df.y,
-            color='orange', label='Actual')
-
-        # plot each outlier in red, uncomment the second line to annotate date (makes it super crowded though)
-        for outlier in self.outliers:
-            ax.scatter(outlier[0], outlier[1], s = 16, marker='x', color='red', label='Anomaly')
-            # ax.text(outlier[0], outlier[1], str(outlier[0])[:10], color='red')
-
-
-        # re-organize the legend
-        patch1 = mpatches.Patch(color='red', label='Anomaly')
-        patch2 = mpatches.Patch(color='orange', label='Actual')
-        patch3 = mpatches.Patch(color='skyblue', label='Prediction interval')
-        plt.legend(handles=[patch1, 
-                            patch2, 
-                            patch3, 
-                            ])
-        
-        #plot the changepoints
-
-        color_cycle = cycle(self.color_cycle)
-        for (start, end), col in zip(pairwise(self.changepnts), color_cycle):
-            ax.axvspan(self.df.iloc[max(0,start-1)]['ds'], self.df.iloc[end-1]['ds'], facecolor=col,alpha=0.2)
-
-        plt.show()
